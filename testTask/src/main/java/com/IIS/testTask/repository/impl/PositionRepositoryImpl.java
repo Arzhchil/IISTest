@@ -10,9 +10,11 @@ import org.springframework.transaction.annotation.Transactional;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
+import org.xml.sax.SAXException;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
@@ -20,6 +22,8 @@ import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.*;
 
 /**
@@ -165,10 +169,13 @@ public class PositionRepositoryImpl implements PositionRepository {
     @Transactional
     public void syncFromXml(String filePath) throws Exception {
         validateXmlFile(filePath);
+
         Map<String, Position> xmlPositions = parseXmlFile(filePath);
+
         createTempTableAndInsertData(xmlPositions);
         deleteUnmatchedRows();
         upsertNewOrUpdatedRows(xmlPositions);
+
         log.info("Синхронизация завершена: {}", filePath);
     }
 
@@ -179,10 +186,18 @@ public class PositionRepositoryImpl implements PositionRepository {
      * @throws FileNotFoundException    Если файл не существует.
      * @throws IllegalArgumentException Если файл пуст.
      */
-    private void validateXmlFile(String filePath) throws FileNotFoundException {
+    private void validateXmlFile(String filePath) throws IOException {
         File xmlFile = new File(filePath);
         if (!xmlFile.exists()) {
             throw new FileNotFoundException("Файл не найден: " + filePath);
+        }
+        if (xmlFile.length() == 0) {
+            throw new IllegalArgumentException("Файл пуст. Синхронизация невозможна.");
+        }
+
+        String fileContent = Files.readString(xmlFile.toPath());
+        if (fileContent.trim().matches("^<\\?xml[^>]*>\\s*$")) {
+            throw new IllegalArgumentException("Файл содержит только объявление XML без данных.");
         }
     }
 
@@ -193,35 +208,46 @@ public class PositionRepositoryImpl implements PositionRepository {
      * @return Карта с уникальными записями.
      * @throws IllegalStateException Если найдены дубликаты.
      */
-    private Map<String, Position> parseXmlFile(String filePath) throws Exception {
-        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        DocumentBuilder builder = factory.newDocumentBuilder();
-        Document doc = builder.parse(new File(filePath));
+    private Map<String, Position> parseXmlFile(String filePath) {
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            DocumentBuilder builder = factory.newDocumentBuilder();
 
-        NodeList positionNodes = doc.getElementsByTagName("position");
-        if (positionNodes.getLength() == 0) {
-            throw new IllegalArgumentException("XML-файл пуст. Синхронизация невозможна.");
-        }
+            Document doc = builder.parse(new File(filePath));
 
-        Map<String, Position> xmlPositions = new HashMap<>();
-        for (int i = 0; i < positionNodes.getLength(); i++) {
-            Element positionNode = (Element) positionNodes.item(i);
-            String depCode = getXmlElementTextContent(positionNode, "depCode");
-            String depJob = getXmlElementTextContent(positionNode, "depJob");
-            String naturalKey = depCode + ":" + depJob;
-
-            if (xmlPositions.containsKey(naturalKey)) {
-                throw new IllegalStateException("Дублирующийся натуральный ключ в XML: " + naturalKey);
+            Element root = doc.getDocumentElement();
+            if (root == null || !root.getTagName().equals("positions")) {
+                throw new IllegalArgumentException("Отсутствует корневой элемент <positions> в XML-файле");
             }
 
-            xmlPositions.put(naturalKey, new Position(
-                    depCode,
-                    depJob,
-                    getXmlElementTextContent(positionNode, "description")
-            ));
-        }
+            NodeList positionNodes = doc.getElementsByTagName("position");
+            if (positionNodes.getLength() == 0) {
+                throw new IllegalArgumentException("XML-файл пуст. Синхронизация невозможна.");
+            }
 
-        return xmlPositions;
+            Map<String, Position> xmlPositions = new HashMap<>();
+            for (int i = 0; i < positionNodes.getLength(); i++) {
+                Element positionNode = (Element) positionNodes.item(i);
+                String depCode = getXmlElementTextContent(positionNode, "depCode");
+                String depJob = getXmlElementTextContent(positionNode, "depJob");
+                String naturalKey = depCode + ":" + depJob;
+
+                if (xmlPositions.containsKey(naturalKey)) {
+                    throw new IllegalStateException("Дублирующийся натуральный ключ в XML: " + naturalKey);
+                }
+
+                xmlPositions.put(naturalKey, new Position(
+                        depCode,
+                        depJob,
+                        getXmlElementTextContent(positionNode, "description")
+                ));
+            }
+
+            return xmlPositions;
+        } catch (ParserConfigurationException | SAXException | IOException e) {
+            log.error("Поврежденный XML-файл: {}", e.getMessage(), e);
+            throw new IllegalArgumentException("Файл XML поврежден или имеет неправильную структуру", e);
+        }
     }
 
     /**
