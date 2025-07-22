@@ -13,7 +13,7 @@ public interface PositionRepository {
      *                 В файл записываются поля DepCode, DepJob, Description.
      * @throws RuntimeException Если произошла ошибка при создании директории или записи файла.
      */
-    void exportToXml(String filePath);
+    void exportToXml(String filePath) throws Exception;
 
     /**
      * Синхронизирует данные в таблице Positions с содержимым XML-файла.
